@@ -1,0 +1,61 @@
+name: Build termux-x11 (APK)
+
+# Step one of the low-latency ink route that does NOT go through Qt.
+#
+# Measured on a Note Air 4C (boox repo, runbook 13): the native Boox note app
+# draws ink with ZERO DRM frame commits, because SurfaceFlinger reads the
+# digitizer itself and the EPD layer paints the stroke -- it never produces an
+# Android frame. Nothing done on the Qt side can reach that; the display ticks
+# at 38 Hz (26.3 ms) and the best the Qt path can do is land on the next tick.
+#
+# The way in is Onyx's pen SDK (com.onyx.android.sdk:onyxsdk-pen, public at
+# repo.boox.com), whose TouchHelper binds to a SurfaceView -- and termux-x11's
+# drawing surface IS one: `com.termux.x11.LorieView extends SurfaceView`. So
+# the preview can be drawn by the EPD inside the app already hosting the X
+# session, and the points can be fed straight into X through LorieView's own
+# InputStub, with no second app, no overlay permission and no socket.
+#
+# This workflow builds termux-x11 UNMODIFIED. It exists to prove the toolchain
+# works before any of that is attempted -- the same reason the MuseScore build
+# was proven before the first patch was written.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'termux-x11 ref to build'
+        default: 'master'
+        required: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest        # Android SDK is preinstalled on this image
+    steps:
+      - name: Clone termux-x11
+        uses: actions/checkout@v4
+        with:
+          repository: termux/termux-x11
+          ref: ${{ inputs.ref }}
+          submodules: recursive
+          fetch-depth: 1
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Build debug APK
+        run: ./gradlew :app:assembleDebug --no-daemon --stacktrace
+
+      - name: Collect APKs
+        run: |
+          mkdir -p out
+          find . -name '*.apk' -path '*debug*' -exec cp {} out/ \;
+          ls -la out/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: termux-x11-debug-apk
+          path: out/
