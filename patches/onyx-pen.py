@@ -58,6 +58,31 @@ edit("lorie/build.gradle",
     }""",
      "onyxsdk-pen dependency")
 
+# 2b. The SDK's manifest declares application-level attributes of its own
+# (allowBackup=true, label=@string/app_name) which collide with lorie's. Tell
+# the merger ours win -- an SDK should not be relabelling the host app anyway.
+# Both lorie's manifest and lorie-app's sharedUid flavour need it, since the
+# shared-UID variant merges the library in too.
+for manifest, anchor in (
+    ("lorie/src/main/AndroidManifest.xml", "    <application\n"),
+    ("lorie-app/src/sharedUid/AndroidManifest.xml", "    <application\n"),
+):
+    p = root / manifest
+    if not p.exists():
+        print(f"  ! {manifest} missing, skipped")
+        continue
+    s = p.read_text()
+    if 'tools:replace' in s:
+        print(f"  = tools:replace already in {manifest}")
+        continue
+    if "xmlns:tools" not in s:
+        s = s.replace("<manifest ", '<manifest xmlns:tools="http://schemas.android.com/tools" ', 1)
+    if s.count(anchor) < 1:
+        sys.exit(f"ANCHOR NOT FOUND in {manifest}: <application")
+    s = s.replace(anchor, '    <application\n        tools:replace="android:allowBackup,android:label"\n', 1)
+    p.write_text(s)
+    print(f"  + tools:replace in {manifest}")
+
 # 3. The hook.
 (root / "lorie/src/main/java/com/termux/x11/OnyxPen.java").write_text('''package com.termux.x11;
 
