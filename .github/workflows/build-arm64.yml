@@ -1,0 +1,113 @@
+name: Build fork (linux arm64)
+
+# Build an aarch64 AppImage of the MuseScore stylus fork for the Boox.
+#
+# Why this repo exists at all: GitHub disables Actions on FORKED repositories
+# until a human clicks "I understand my workflows, go ahead and enable them" on
+# the Actions tab, and that gate has no REST endpoint -- every API route
+# answers `422 Actions has been disabled for this repository`. This repo is not
+# a fork, so it has no gate. It holds no source: the build checks the fork out
+# at run time, which is also why any branch can be built without touching it.
+#
+# The steps mirror sebastianstupak/MuseScore .github/workflows/build_linux.yml
+# (the workflow that produced every existing release) minus Sentry, Transifex
+# and the OSUOSL publish, none of which matter for a device build.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Branch or tag of sebastianstupak/MuseScore to build'
+        default: 'stylus-4.7-ink-damage-rect'
+        required: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm      # free for PUBLIC repos; private ones do not get it
+    steps:
+      - name: Clone the fork
+        uses: actions/checkout@v4
+        with:
+          repository: sebastianstupak/MuseScore
+          ref: ${{ inputs.ref }}
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Restore ccache
+        id: restore-ccache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ${{ runner.os }}-${{ runner.arch }}-ccache-
+          restore-keys: ${{ runner.os }}-${{ runner.arch }}-ccache-
+
+      - name: Setup ccache
+        run: |
+          sudo apt-get update && sudo apt-get install -y ccache
+          bash ./buildscripts/ci/tools/setup_ccache_config.sh
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: 6.10.2
+          host: linux_arm64
+          target: desktop
+          arch: linux_gcc_arm64
+          modules: 'qt5compat qtnetworkauth qtshadertools qtwebsockets'
+          cache: true
+
+      - name: Build env
+        run: |
+          bash ./buildscripts/ci/tools/make_build_mode_env.sh -e workflow_dispatch -m devel
+          bash ./buildscripts/ci/tools/make_build_number.sh
+          echo "BUILD_NUMBER=$(cat ./build.artifacts/env/build_number.env)" >> $GITHUB_ENV
+
+      - name: Setup environment
+        run: bash ./buildscripts/ci/linux/setup.sh --arch aarch64 --build-pipewire
+
+      - name: Generate _en.ts files
+        env:
+          LUPDATE_ARGS: ""
+          POSTPROCESS_ARGS: "--generate-placeholder-translations"
+        run: bash ./tools/translations/run_lupdate.sh
+
+      - name: Build
+        run: |
+          bash ./buildscripts/ci/linux/build.sh -n ${{ env.BUILD_NUMBER }} \
+            --crash_log_url "''" --arch aarch64 --build-pipewire
+
+      - name: ccache stats
+        run: ccache -sv
+
+      - name: Package
+        run: bash ./buildscripts/ci/linux/package.sh --arch aarch64 --build-pipewire
+
+      - name: Checksum
+        run: bash ./buildscripts/ci/tools/checksum.sh
+
+      # The AppImage is the fallback path (MS_FORK_APPIMAGE=... ./setup 69).
+      # The fast path is the bare executable: scripts/67-fork-devdeploy.sh in
+      # the boox repo swaps just this into the extracted /opt/ms-fork tree in
+      # ~30 s, so upload it on its own too.
+      - name: Collect the bare executable
+        run: |
+          APP_BIN=$(find build.release/src/app/ -type f -name 'mscore4portable*' -print -quit)
+          echo "found: $APP_BIN"
+          mkdir -p bare && cp "$APP_BIN" bare/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: appimage-aarch64
+          path: ./build.artifacts/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mscore4portabledev-aarch64
+          path: ./bare/
+
+      - name: Save ccache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          key: ${{ runner.os }}-${{ runner.arch }}-ccache-${{ github.run_id }}
+          path: ${{ github.workspace }}/.ccache
