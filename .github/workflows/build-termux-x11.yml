@@ -46,8 +46,12 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
 
+      # `assembleDebug` without a module, exactly as termux-x11's own
+      # debug_build.yml does it. The modules here are :lorie, :lorie-app and
+      # :shell-loader -- there is no :app, which is what the first attempt
+      # assumed from convention and got wrong.
       - name: Build debug APK
-        run: ./gradlew :app:assembleDebug --no-daemon --stacktrace
+        run: ./gradlew assembleDebug --no-daemon --stacktrace
 
       - name: Collect APKs
         run: |
