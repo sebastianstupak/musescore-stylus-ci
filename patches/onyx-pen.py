@@ -47,7 +47,15 @@ edit("build.gradle",
 edit("lorie/build.gradle",
      """    implementation 'androidx.preference:preference:1.2.1'""",
      """    implementation 'androidx.preference:preference:1.2.1'
-    implementation 'com.onyx.android.sdk:onyxsdk-pen:1.5.4.4'""",
+    // The SDK still declares the pre-AndroidX support library, whose classes
+    // duplicate androidx.core and break :lorie-app's shared-UID duplicate
+    // check (two APKs here share a UID, so that check is strict):
+    //   Duplicate class android.support.v4.app.INotificationSideChannel found in
+    //   core-1.13.1.aar and support-compat-24.2.1.aar
+    // Nothing used from the pen SDK needs it.
+    implementation('com.onyx.android.sdk:onyxsdk-pen:1.5.4.4') {
+        exclude group: 'com.android.support'
+    }""",
      "onyxsdk-pen dependency")
 
 # 3. The hook.
