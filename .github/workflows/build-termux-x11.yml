@@ -26,6 +26,10 @@ on:
         description: 'termux-x11 ref to build'
         default: 'master'
         required: true
+      patch:
+        description: 'Apply patches/onyx-pen.py (low-latency ink): true/false'
+        default: 'false'
+        required: false
 
 jobs:
   build:
@@ -38,6 +42,19 @@ jobs:
           ref: ${{ inputs.ref }}
           submodules: recursive
           fetch-depth: 1
+
+      # The patch lives in THIS repo, applied to a fresh upstream checkout, so
+      # there is no fork to keep rebased and the diff stays reviewable in one
+      # place.
+      - name: Fetch the patch scripts
+        if: inputs.patch == 'true'
+        uses: actions/checkout@v4
+        with:
+          path: ci-patches
+
+      - name: Apply the Onyx pen patch
+        if: inputs.patch == 'true'
+        run: python3 ci-patches/patches/onyx-pen.py
 
       - uses: actions/setup-java@v4
         with:
@@ -61,5 +78,5 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: termux-x11-debug-apk
+          name: termux-x11-debug-apk${{ inputs.patch == 'true' && '-onyxpen' || '' }}
           path: out/
