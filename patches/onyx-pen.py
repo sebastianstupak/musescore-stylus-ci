@@ -53,7 +53,7 @@ edit("lorie/build.gradle",
     //   Duplicate class android.support.v4.app.INotificationSideChannel found in
     //   core-1.13.1.aar and support-compat-24.2.1.aar
     // Nothing used from the pen SDK needs it.
-    implementation('com.onyx.android.sdk:onyxsdk-pen:1.5.4.4') {
+    implementation('com.onyx.android.sdk:onyxsdk-pen:1.5.9') {
         exclude group: 'com.android.support'
     }""",
      "onyxsdk-pen dependency")
@@ -270,7 +270,14 @@ public final class OnyxPen {
      * measurement stops being a null arm.
      */
     public static boolean wantsViewTouchTarget(Context ctx) {
-        return "eac".equals(readMode(ctx));
+        // Both real modes want it, for the same reason: it is what makes the
+        // framework pass EAC the view our config names, and EAC's
+        // allowApplyTransientUpdate is what suppresses the refresh-on-touch
+        // whose DRM commit ends handwriting mode. "sdk" needs that suppression
+        // just as much -- measured, sdk mode without it took 4 frames per
+        // stroke and painted nothing.
+        String m = readMode(ctx);
+        return "eac".equals(m) || "sdk".equals(m);
     }
 
     private static String readMode(Context ctx) {
