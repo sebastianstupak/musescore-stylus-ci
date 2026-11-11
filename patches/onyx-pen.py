@@ -150,9 +150,7 @@ edit("lorie-app/build.gradle",
 import android.graphics.Rect;
 import android.util.Log;
 
-import com.onyx.android.sdk.api.device.epd.EpdController;
 import com.onyx.android.sdk.data.note.TouchPoint;
-import com.onyx.android.sdk.pen.EpdPenManager;
 import com.onyx.android.sdk.pen.RawInputCallback;
 import com.onyx.android.sdk.pen.TouchHelper;
 import com.onyx.android.sdk.pen.data.TouchPointList;
@@ -180,6 +178,9 @@ public final class OnyxPen {
     private static final String TAG = "OnyxPen";
     private static final float PRESSURE_SCALE = 65535.0f / 4095.0f;
     private static final float STROKE_WIDTH = 3.0f;
+    // Long enough that it does not fire between the strokes of a single
+    // written character, short enough to feel immediate.
+    private static final int PEN_UP_REFRESH_MS = 400;
 
     private static TouchHelper helper;
     private static LorieView view;
@@ -199,19 +200,41 @@ public final class OnyxPen {
             public void run() {
                 try {
                     Rect limit = new Rect(0, 0, v.getWidth(), v.getHeight());
-                    helper = TouchHelper.create(v, callback)
-                            .setStrokeWidth(3.0f)
+                    // FEATURE_SF_TOUCH_RENDER, not the default.
+                    //
+                    // create(view, callback) selects FEATURE_APP_TOUCH_RENDER
+                    // (=1), where the SDK captures the pen and the APP is
+                    // expected to paint it. That is exactly what we measured:
+                    // points arrived (X events per stroke 43 -> 85) and the
+                    // panel never changed scheme -- a native scribble activity
+                    // logs "### EUS, s 3", ours logged only "### EE 0/1".
+                    // Capture without paint.
+                    //
+                    // FEATURE_SF_TOUCH_RENDER (=2) selects SFTouchRender, which
+                    // (from the AAR) drives EpdPenManager.startDrawing() on the
+                    // host view and EpdController.leaveScribbleMode() on the way
+                    // out. SurfaceFlinger painting the stroke IS the native
+                    // path, and it is the one thing we could not reach from
+                    // outside the app that owns the surface.
+                    helper = TouchHelper.create(v, TouchHelper.FEATURE_SF_TOUCH_RENDER, callback)
+                            .setStrokeWidth(STROKE_WIDTH)
                             .setLimitRect(limit, new ArrayList<Rect>())
                             .openRawDrawing();
                     helper.setRawDrawingEnabled(true);
-                    // Deliberately NOT PEN_START here. Putting the panel into
-                    // handwriting mode at startup and leaving it there stops
-                    // the screen refreshing at all -- the SDK says as much
-                    // ("the screen will not refresh") and the device proved
-                    // it: the editor froze, and a liveness check that draws
-                    // ink and counts changed pixels read 0. Handwriting mode
-                    // is entered per STROKE, below.
-                    Log.i(TAG, "raw drawing enabled, limit=" + limit);
+                    // Input and RENDER are separate switches
+                    // (isRawDrawingInputEnabled vs isRawDrawingRenderEnabled).
+                    // setRawDrawingEnabled alone is the capture half.
+                    helper.setRawDrawingRenderEnabled(true);
+                    // The SDK owns the way back out, and that is the whole
+                    // lesson of the three rolled-back builds below: after a
+                    // stroke the panel has to leave handwriting mode and take a
+                    // full refresh, or the app's own repaint never appears.
+                    // Driving that by hand through EpdController froze the
+                    // display every time. setPenUpRefresh* is the SDK's own
+                    // version of it, sequenced correctly from inside.
+                    helper.setPenUpRefreshEnabled(true);
+                    helper.setPenUpRefreshTimeMs(PEN_UP_REFRESH_MS);
+                    Log.i(TAG, "raw drawing enabled (SF render), limit=" + limit);
                 } catch (Throwable t) {
                     Log.i(TAG, "unavailable, carrying on without it: " + t);
                     helper = null;
@@ -234,62 +257,21 @@ public final class OnyxPen {
         }
     }
 
-    // TouchHelper CAPTURES the pen; it does not by itself make the panel paint.
-    // Measured: with TouchHelper alone the SDK delivers points (X event count
-    // per stroke went 43 -> 85, the extra ones being these forwards) but the
-    // EPD never switched scheme -- a native scribble activity logs
-    // "### EUS, s 3", ours logged only "### EE 0/1". The stroke has to be
-    // handed to the controller explicitly, which is what the SDK's own
-    // EpdController demo does.
-    private static void epdBegin(TouchPoint p) {
-        LorieView v = view;
-        if (v == null || p == null) {
-            return;
-        }
-        try {
-            EpdController.setScreenHandWritingPenState(v, EpdPenManager.PEN_START);
-            EpdController.setScreenHandWritingPenState(v, EpdPenManager.PEN_DRAWING);
-            EpdController.moveTo(v, p.x, p.y, STROKE_WIDTH);
-        } catch (Throwable t) {
-            Log.i(TAG, "epdBegin failed: " + t);
-        }
-    }
-
-    private static void epdPoint(TouchPoint p) {
-        if (p == null) {
-            return;
-        }
-        try {
-            EpdController.addStrokePoint(STROKE_WIDTH, p.x, p.y, p.pressure, p.size, p.timestamp);
-        } catch (Throwable t) {
-            Log.i(TAG, "epdPoint failed: " + t);
-        }
-    }
-
-    private static void epdEnd(TouchPoint p) {
-        LorieView v = view;
-        try {
-            if (p != null) {
-                EpdController.finishStroke(STROKE_WIDTH, p.x, p.y, p.pressure, p.size, p.timestamp);
-            }
-            EpdController.penUp();
-            if (v != null) {
-                // PEN_STOP, not PEN_PAUSE: the panel must leave handwriting
-                // mode between strokes or the app's own repaint never shows.
-                EpdController.setScreenHandWritingPenState(v, EpdPenManager.PEN_STOP);
-                // ...and PEN_STOP alone is not enough. Measured: with only
-                // PEN_STOP the panel stayed frozen (liveness check: 0 px) and
-                // the build had to be rolled back. The SDK's own
-                // RendererToScreenRequest pairs every
-                // setViewDefaultUpdateMode(view, HAND_WRITING_REPAINT_MODE)
-                // with resetViewUpdateMode(view) -- that is the call that
-                // gives the view back to normal refresh.
-                EpdController.resetViewUpdateMode(v);
-            }
-        } catch (Throwable t) {
-            Log.i(TAG, "epdEnd failed: " + t);
-        }
-    }
+    // NO EpdController CALLS HERE, on purpose. Three builds drove the pen
+    // state by hand and all three had to be rolled back:
+    //
+    //   PEN_START at startup                  -> panel frozen (liveness 0 px)
+    //   PEN_START/PEN_STOP per stroke         -> panel frozen
+    //   ...plus resetViewUpdateMode(view)     -> black screen
+    //
+    // The mistake was mine, not the API's: EpdPenManager owns that lifecycle,
+    // and SFTouchRender (selected by FEATURE_SF_TOUCH_RENDER in attach())
+    // drives it -- startDrawing / pauseDrawing / resumeDrawing / quitDrawing,
+    // then leaveScribbleMode on the way out. Two owners of the panel's refresh
+    // state is exactly how it ends up stuck in one.
+    //
+    // So this class now does precisely two things: ask for SF render, and feed
+    // the points back into X. Painting is the SDK's business.
 
     private static void forward(TouchPoint p, boolean down) {
         LorieView v = view;
@@ -310,19 +292,16 @@ public final class OnyxPen {
     private static final RawInputCallback callback = new RawInputCallback() {
         @Override
         public void onBeginRawDrawing(boolean b, TouchPoint p) {
-            epdBegin(p);
             forward(p, true);
         }
 
         @Override
         public void onEndRawDrawing(boolean b, TouchPoint p) {
-            epdEnd(p);
             forward(p, false);
         }
 
         @Override
         public void onRawDrawingTouchPointMoveReceived(TouchPoint p) {
-            epdPoint(p);
             forward(p, true);
         }
 
