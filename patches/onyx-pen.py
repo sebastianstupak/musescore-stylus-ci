@@ -105,6 +105,29 @@ edit("lorie-app/build.gradle",
     namespace 'com.termux.x11.app'""",
      "pickFirst libc++_shared.so")
 
+# 2d. R8 refuses to minify with classes it cannot resolve. MMKV (pulled in by
+# the pen SDK) references the pre-AndroidX support ANNOTATIONS, which 2's
+# exclusion removed along with support-compat:
+#   Missing class android.support.annotation.NonNull (referenced from
+#   com.tencent.mmkv.MMKVContentProvider.call and 30 other contexts)
+# They are compile-time only, so nothing needs them at runtime -- but R8 has to
+# be told. The keep rule is separate: the SDK reaches its own classes
+# reflectively, and minification would otherwise be free to rename them.
+rules = root / "lorie-app/proguard-rules.pro"
+addition = """
+
+# --- Onyx pen SDK (added by patches/onyx-pen.py) ---
+-dontwarn android.support.**
+-dontwarn com.onyx.**
+-keep class com.onyx.** { *; }
+-keep class com.tencent.mmkv.** { *; }
+"""
+if "Onyx pen SDK" in rules.read_text():
+    print("  = proguard rules already present")
+else:
+    rules.write_text(rules.read_text() + addition)
+    print("  + proguard rules for the SDK")
+
 # 3. The hook.
 (root / "lorie/src/main/java/com/termux/x11/OnyxPen.java").write_text('''package com.termux.x11;
 
