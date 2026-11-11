@@ -128,6 +128,22 @@ else:
     rules.write_text(rules.read_text() + addition)
     print("  + proguard rules for the SDK")
 
+# 2e. Turn minification off for this debug build.
+#
+# R8 refuses to run while any referenced class is unresolvable, and the pen SDK
+# references a pile it does not ship or need: the support annotations (removed
+# by 2's exclusion), then androidx.cardview, androidx.databinding and
+# androidx.window.extensions. Adding -dontwarn for each is whack-a-mole against
+# a list R8 only reveals one build at a time, and minification buys an
+# experimental build nothing -- only a smaller APK and renamed symbols that
+# make the SDK's reflective lookups riskier.
+edit("lorie-app/build.gradle",
+     """        minifyEnabled true
+        shrinkResources true""",
+     """        minifyEnabled false
+        shrinkResources false""",
+     "minification off for debug")
+
 # 3. The hook.
 (root / "lorie/src/main/java/com/termux/x11/OnyxPen.java").write_text('''package com.termux.x11;
 
