@@ -204,11 +204,13 @@ public final class OnyxPen {
                             .setLimitRect(limit, new ArrayList<Rect>())
                             .openRawDrawing();
                     helper.setRawDrawingEnabled(true);
-                    try {
-                        EpdController.setScreenHandWritingPenState(v, EpdPenManager.PEN_START);
-                    } catch (Throwable t) {
-                        Log.i(TAG, "PEN_START failed: " + t);
-                    }
+                    // Deliberately NOT PEN_START here. Putting the panel into
+                    // handwriting mode at startup and leaving it there stops
+                    // the screen refreshing at all -- the SDK says as much
+                    // ("the screen will not refresh") and the device proved
+                    // it: the editor froze, and a liveness check that draws
+                    // ink and counts changed pixels read 0. Handwriting mode
+                    // is entered per STROKE, below.
                     Log.i(TAG, "raw drawing enabled, limit=" + limit);
                 } catch (Throwable t) {
                     Log.i(TAG, "unavailable, carrying on without it: " + t);
@@ -245,6 +247,7 @@ public final class OnyxPen {
             return;
         }
         try {
+            EpdController.setScreenHandWritingPenState(v, EpdPenManager.PEN_START);
             EpdController.setScreenHandWritingPenState(v, EpdPenManager.PEN_DRAWING);
             EpdController.moveTo(v, p.x, p.y, STROKE_WIDTH);
         } catch (Throwable t) {
@@ -271,7 +274,9 @@ public final class OnyxPen {
             }
             EpdController.penUp();
             if (v != null) {
-                EpdController.setScreenHandWritingPenState(v, EpdPenManager.PEN_PAUSE);
+                // PEN_STOP, not PEN_PAUSE: the panel must leave handwriting
+                // mode between strokes or the app's own repaint never shows.
+                EpdController.setScreenHandWritingPenState(v, EpdPenManager.PEN_STOP);
             }
         } catch (Throwable t) {
             Log.i(TAG, "epdEnd failed: " + t);
