@@ -240,6 +240,8 @@ public final class OnyxPen {
     // EACScreenNoteManager, reached reflectively: it is framework-internal, so
     // there is nothing to compile against. Resolved once.
     private static int moves;
+    private static boolean pushPoints;
+    private static java.lang.reflect.Method mMoveTo, mAddPoint, mFinishStroke, mPenUp;
     private static int reapplyEvery;
     private static Object eacManager;
     private static Method eacOnDispatchMotionEvent;
@@ -366,6 +368,70 @@ public final class OnyxPen {
     }
 
     /**
+     * Bind the framework's point-push calls.
+     *
+     * Measured (runbook 13 4r): with EAC driving, SurfaceFlinger paints our
+     * stroke at exactly ONE rectangle per 20 pen samples -- independent of
+     * distance and of time, so it is a hard decimation, not a timer. The
+     * stock Boox canvas gets ~6 paints PER sample, because its SDK PUSHES
+     * every point to the controller rather than leaving SF to sample the
+     * digitizer on its own.
+     *
+     * These are the framework calls that SDK wraps. EAC already owns the pen
+     * state, the region and the refresh suppression, so this adds only the
+     * points -- and deliberately makes NO pen-state call, which is what froze
+     * the panel three times (4o).
+     */
+    private static void bindPointPush() {
+        try {
+            Class<?> c = Class.forName("android.onyx.ViewUpdateHelper");
+            mMoveTo = c.getMethod("moveTo", View.class, float.class, float.class, float.class);
+            mAddPoint = c.getMethod("addStrokePoint", float.class, float.class, float.class,
+                    float.class, float.class, float.class);
+            mFinishStroke = c.getMethod("finishStroke", float.class, float.class, float.class,
+                    float.class, float.class, float.class);
+            mPenUp = c.getMethod("penUp");
+            Log.i(TAG, "point push bound");
+        } catch (Throwable t) {
+            Log.i(TAG, "point push unavailable: " + t);
+            mMoveTo = mAddPoint = mFinishStroke = mPenUp = null;
+        }
+    }
+
+    private static void push(MotionEvent e) {
+        LorieView v = view;
+        if (v == null || mAddPoint == null) {
+            return;
+        }
+        // The LorieView is positioned at 0,0 and fills the screen, so view
+        // coordinates are screen coordinates and need no mapping.
+        float x = e.getX(), y = e.getY();
+        float pressure = e.getPressure() * 4095.0f;    // MotionEvent 0..1 -> SDK 0..4095
+        float size = e.getSize();
+        float ts = (float) e.getEventTime();
+        try {
+            switch (e.getAction()) {
+                case MotionEvent.ACTION_DOWN:
+                    mMoveTo.invoke(null, v, x, y, STROKE_WIDTH);
+                    break;
+                case MotionEvent.ACTION_MOVE:
+                    mAddPoint.invoke(null, STROKE_WIDTH, x, y, pressure, size, ts);
+                    break;
+                case MotionEvent.ACTION_UP:
+                case MotionEvent.ACTION_CANCEL:
+                    mFinishStroke.invoke(null, STROKE_WIDTH, x, y, pressure, size, ts);
+                    mPenUp.invoke(null);
+                    break;
+                default:
+                    break;
+            }
+        } catch (Throwable t) {
+            Log.i(TAG, "point push failed, disabling: " + t);
+            mAddPoint = null;
+        }
+    }
+
+    /**
      * Pen-down hook. Re-applies the tunables because EAC sets its own stroke
      * parameters when it enters handwriting mode, which may land after the
      * ones applied at attach time.
@@ -378,6 +444,9 @@ public final class OnyxPen {
         if (e.getToolType(0) != MotionEvent.TOOL_TYPE_STYLUS
                 && e.getToolType(0) != MotionEvent.TOOL_TYPE_ERASER) {
             return;
+        }
+        if (pushPoints) {
+            push(e);
         }
         // On DOWN, and then on every Nth MOVE.
         //
@@ -411,6 +480,10 @@ public final class OnyxPen {
                     c.getMethod("onDispatchMotionEvent", View.class, MotionEvent.class);
             Log.i(TAG, "EACScreenNoteManager bound");
             reapplyEvery = intSetting(view.getContext(), "x11_onyx_reapply", 0);
+            pushPoints = intSetting(view.getContext(), "x11_onyx_push", 0) != 0;
+            if (pushPoints) {
+                bindPointPush();
+            }
             applyTunables(view.getContext());
         } catch (Throwable t) {
             Log.i(TAG, "no EACScreenNoteManager, carrying on without it: " + t);
