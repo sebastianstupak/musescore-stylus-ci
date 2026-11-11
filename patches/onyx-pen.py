@@ -284,6 +284,72 @@ public final class OnyxPen {
         return "eac";
     }
 
+    /**
+     * Framework knobs for the SurfaceFlinger handwriting path, each driven by
+     * a Settings.Global value so they can be swept from adb with no rebuild:
+     *
+     *   settings put global x11_onyx_updlist 1     # ViewUpdateHelper.setUpdListSize
+     *   settings put global x11_onyx_brush   1     # setBrushRawDrawingEnabled
+     *   settings put global x11_onyx_trigger 1     # setTrigger
+     *   settings put global x11_onyx_refresh 4     # EInkHelper.setAppScopeRefreshMode
+     *   settings delete global x11_onyx_updlist    # leave the firmware default
+     *
+     * Why these exist: measured, SF paints our strokes at exactly ONE
+     * ebc_ioctl HANDWRITE per 20 pen samples -- scaling with sample count, not
+     * time (40/80/160 samples -> 2/4/8 paints; the same 40 samples stretched
+     * over 2 s still gives 2). The stock Boox canvas gets ~6 paints PER
+     * sample. Something is batching ours by 20, and setUpdListSize is the
+     * candidate the name points at.
+     *
+     * An unset value means "do not call at all", so the default build changes
+     * nothing until a knob is deliberately turned.
+     */
+    private static void applyTunables(Context ctx) {
+        callInt(ctx, "x11_onyx_updlist", "android.onyx.ViewUpdateHelper", "setUpdListSize", int.class);
+        callInt(ctx, "x11_onyx_trigger", "android.onyx.ViewUpdateHelper", "setTrigger", int.class);
+        callInt(ctx, "x11_onyx_brush", "android.onyx.ViewUpdateHelper", "setBrushRawDrawingEnabled", boolean.class);
+        callInt(ctx, "x11_onyx_autosync", "android.onyx.ViewUpdateHelper", "setAutoSyncBufEnable", boolean.class);
+        callInt(ctx, "x11_onyx_regionmode", "android.onyx.ViewUpdateHelper", "setScreenHandWritingRegionMode", int.class);
+        callInt(ctx, "x11_onyx_refresh", "android.onyx.optimization.EInkHelper", "setAppScopeRefreshMode", int.class);
+    }
+
+    private static void callInt(Context ctx, String key, String cls, String method, Class<?> type) {
+        String raw;
+        try {
+            raw = Settings.Global.getString(ctx.getContentResolver(), key);
+        } catch (Throwable t) {
+            return;
+        }
+        if (raw == null || raw.trim().isEmpty()) {
+            return;                       // unset: leave the firmware default
+        }
+        try {
+            int v = Integer.parseInt(raw.trim());
+            Object arg = (type == boolean.class) ? (Object) Boolean.valueOf(v != 0) : (Object) Integer.valueOf(v);
+            Class.forName(cls).getMethod(method, type).invoke(null, arg);
+            Log.i(TAG, key + "=" + v + " -> " + method);
+        } catch (Throwable t) {
+            Log.i(TAG, key + " failed: " + t);
+        }
+    }
+
+    /**
+     * Pen-down hook. Re-applies the tunables because EAC sets its own stroke
+     * parameters when it enters handwriting mode, which may land after the
+     * ones applied at attach time.
+     */
+    public static void onStrokeStart(MotionEvent e) {
+        LorieView v = view;
+        if (v == null || e == null || e.getAction() != MotionEvent.ACTION_DOWN) {
+            return;
+        }
+        if (e.getToolType(0) != MotionEvent.TOOL_TYPE_STYLUS
+                && e.getToolType(0) != MotionEvent.TOOL_TYPE_ERASER) {
+            return;
+        }
+        applyTunables(v.getContext());
+    }
+
     private static void bindEac() {
         try {
             Class<?> c = Class.forName("android.onyx.optimization.EACScreenNoteManager");
@@ -291,6 +357,7 @@ public final class OnyxPen {
             eacOnDispatchMotionEvent =
                     c.getMethod("onDispatchMotionEvent", View.class, MotionEvent.class);
             Log.i(TAG, "EACScreenNoteManager bound");
+            applyTunables(view.getContext());
         } catch (Throwable t) {
             Log.i(TAG, "no EACScreenNoteManager, carrying on without it: " + t);
             eacManager = null;
@@ -506,6 +573,8 @@ edit("lorie/src/main/java/com/termux/x11/MainActivity.java",
         // view's space.
         if (OnyxPen.wantsViewTouchTarget(lorieView.getContext())) {
             lorieView.setOnTouchListener((v, e) -> {
+                OnyxPen.onStrokeStart(e);
+
                 if (e.getAction() == MotionEvent.ACTION_DOWN)
                     lorieView.requestUnbufferedDispatch(e);
 
