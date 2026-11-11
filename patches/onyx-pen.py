@@ -259,6 +259,16 @@ public final class OnyxPen {
         }
     }
 
+    /**
+     * Should the LorieView itself be the touch target?
+     *
+     * Only in "eac" mode -- "off" has to stay stock, or the null arm of every
+     * measurement stops being a null arm.
+     */
+    public static boolean wantsViewTouchTarget(Context ctx) {
+        return "eac".equals(readMode(ctx));
+    }
+
     private static String readMode(Context ctx) {
         try {
             // Settings.Global is public API, deliberately: this has to be
@@ -454,5 +464,56 @@ edit("lorie/src/main/java/com/termux/x11/MainActivity.java",
             if (e.getAction() == MotionEvent.ACTION_DOWN)
                 lorieParent.requestUnbufferedDispatch(e);""",
      "OnyxPen.onMotion() in the touch listener")
+
+edit("lorie/src/main/java/com/termux/x11/MainActivity.java",
+     """        lorieParent.setOnHoverListener((v, e) -> mInputHandler.handleTouchEvent(lorieParent, lorieView, e));
+        lorieParent.setOnGenericMotionListener((v, e) -> mInputHandler.handleTouchEvent(lorieParent, lorieView, e));""",
+     """        lorieParent.setOnHoverListener((v, e) -> mInputHandler.handleTouchEvent(lorieParent, lorieView, e));
+        lorieParent.setOnGenericMotionListener((v, e) -> mInputHandler.handleTouchEvent(lorieParent, lorieView, e));
+
+        // Onyx: make the LorieView ITSELF the touch target.
+        //
+        // This is the whole fix, and it is not about our code seeing the event
+        // -- it is about which view the FRAMEWORK sees. This firmware patches
+        // android.view.View to consult EAC on two hooks, and both are passed
+        // `this`:
+        //
+        //   dispatchTouchEvent -> EACScreenNoteManager.onDispatchMotionEvent(this, e)
+        //   beforeScroll       -> EACScreenNoteManager.allowApplyTransientUpdate(this, e)
+        //
+        // The second one is the one that matters:
+        //
+        //   if (!isDrawingViewWithEnableConfig(v, noteConfig)) return true;
+        //   return !isStylus(e);
+        //
+        // Matching draw view + stylus => FALSE => EAC suppresses its
+        // refresh-on-touch. Not matching => TRUE => the screen refreshes on
+        // pen-down, and the kernel treats that DRM commit as a reason to leave
+        // handwriting scheme:
+        //
+        //   onyx_tcon_set_upd_scheme(): setting upd scheme level to 4. drm_change[1]
+        //
+        // Measured: handwriting scheme was held for 10.8 ms of a 505 ms stroke,
+        // and SurfaceFlinger (which owns /dev/ebc) painted nothing --
+        // 0 `ebc_ioctl(): HANDWRITE` against dozens for the native canvas.
+        //
+        // Because termux-x11 listens on the PARENT, the parent is the touch
+        // target and both hooks fire with the FrameLayout. Attaching here
+        // makes the LorieView consume the event instead, so the framework
+        // passes the view our EAC config actually names. Nothing else changes:
+        // the same handler runs, with view0 == view, so it applies no
+        // coordinate offset -- which is right, the event is already in this
+        // view's space.
+        if (OnyxPen.wantsViewTouchTarget(lorieView.getContext())) {
+            lorieView.setOnTouchListener((v, e) -> {
+                if (e.getAction() == MotionEvent.ACTION_DOWN)
+                    lorieView.requestUnbufferedDispatch(e);
+
+                return mInputHandler.handleTouchEvent(lorieView, lorieView, e);
+            });
+            lorieView.setOnHoverListener((v, e) -> mInputHandler.handleTouchEvent(lorieView, lorieView, e));
+            lorieView.setOnGenericMotionListener((v, e) -> mInputHandler.handleTouchEvent(lorieView, lorieView, e));
+        }""",
+     "LorieView as the touch target")
 
 print("onyx-pen patch applied")
