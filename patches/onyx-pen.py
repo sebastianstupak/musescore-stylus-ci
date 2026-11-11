@@ -58,36 +58,33 @@ edit("lorie/build.gradle",
     }""",
      "onyxsdk-pen dependency")
 
-# 2b. The SDK's manifest declares application-level attributes of its own
-# (allowBackup=true, label=@string/app_name) which collide with lorie's. Tell
-# the merger ours win -- an SDK should not be relabelling the host app anyway.
-# Both lorie's manifest and lorie-app's sharedUid flavour need it, since the
-# shared-UID variant merges the library in too.
-# The two manifests spell <application> differently -- lorie's is a multi-line
-# element, lorie-app's sharedUid flavour is the self-closing one-liner
-# `<application android:process="com.termux" />` -- so each needs its own
-# anchor rather than one assumed shape.
+# 2b. The SDK's manifest sets application attributes of its own
+# (allowBackup=true, label=@string/app_name) which collide with the host's.
+# tools:replace only works where the attribute is actually DECLARED -- naming
+# android:label on lorie's <application>, which does not declare it, fails with
+# "tools:replace specified for attribute android:label, but no new value
+# specified". So each replace goes where that attribute lives:
+#   lorie/src/main      declares android:allowBackup="false"
+#   lorie-app/src/main  declares android:label="@string/lorie_app_name"
 for manifest, anchor, replacement in (
     ("lorie/src/main/AndroidManifest.xml",
-     "    <application\n",
-     '    <application\n        tools:replace="android:allowBackup,android:label"\n'),
-    ("lorie-app/src/sharedUid/AndroidManifest.xml",
-     '    <application android:process="com.termux" />',
-     '    <application android:process="com.termux"\n'
-     '        tools:replace="android:allowBackup,android:label" />'),
+     "    <application\n        android:name=\".LorieApp\"",
+     '    <application\n        tools:replace="android:allowBackup"\n        android:name=".LorieApp"'),
+    ("lorie-app/src/main/AndroidManifest.xml",
+     "    <application\n        android:icon=",
+     '    <application\n        tools:replace="android:label"\n        android:icon='),
 ):
     p = root / manifest
     if not p.exists():
-        print(f"  ! {manifest} missing, skipped")
-        continue
+        sys.exit(f"MISSING {manifest}")
     s = p.read_text()
-    if 'tools:replace' in s:
+    if "tools:replace" in s:
         print(f"  = tools:replace already in {manifest}")
         continue
     if "xmlns:tools" not in s:
         s = s.replace("<manifest ", '<manifest xmlns:tools="http://schemas.android.com/tools" ', 1)
-    if s.count(anchor) < 1:
-        sys.exit(f"ANCHOR NOT FOUND in {manifest}: {anchor!r}")
+    if s.count(anchor) != 1:
+        sys.exit(f"ANCHOR NOT UNIQUE in {manifest} ({s.count(anchor)}x)")
     s = s.replace(anchor, replacement, 1)
     p.write_text(s)
     print(f"  + tools:replace in {manifest}")
