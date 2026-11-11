@@ -63,9 +63,18 @@ edit("lorie/build.gradle",
 # the merger ours win -- an SDK should not be relabelling the host app anyway.
 # Both lorie's manifest and lorie-app's sharedUid flavour need it, since the
 # shared-UID variant merges the library in too.
-for manifest, anchor in (
-    ("lorie/src/main/AndroidManifest.xml", "    <application\n"),
-    ("lorie-app/src/sharedUid/AndroidManifest.xml", "    <application\n"),
+# The two manifests spell <application> differently -- lorie's is a multi-line
+# element, lorie-app's sharedUid flavour is the self-closing one-liner
+# `<application android:process="com.termux" />` -- so each needs its own
+# anchor rather than one assumed shape.
+for manifest, anchor, replacement in (
+    ("lorie/src/main/AndroidManifest.xml",
+     "    <application\n",
+     '    <application\n        tools:replace="android:allowBackup,android:label"\n'),
+    ("lorie-app/src/sharedUid/AndroidManifest.xml",
+     '    <application android:process="com.termux" />',
+     '    <application android:process="com.termux"\n'
+     '        tools:replace="android:allowBackup,android:label" />'),
 ):
     p = root / manifest
     if not p.exists():
@@ -78,8 +87,8 @@ for manifest, anchor in (
     if "xmlns:tools" not in s:
         s = s.replace("<manifest ", '<manifest xmlns:tools="http://schemas.android.com/tools" ', 1)
     if s.count(anchor) < 1:
-        sys.exit(f"ANCHOR NOT FOUND in {manifest}: <application")
-    s = s.replace(anchor, '    <application\n        tools:replace="android:allowBackup,android:label"\n', 1)
+        sys.exit(f"ANCHOR NOT FOUND in {manifest}: {anchor!r}")
+    s = s.replace(anchor, replacement, 1)
     p.write_text(s)
     print(f"  + tools:replace in {manifest}")
 
