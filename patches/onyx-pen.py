@@ -323,6 +323,15 @@ public final class OnyxPen {
         callInt(ctx, "x11_onyx_regionmode", "android.onyx.ViewUpdateHelper", "setScreenHandWritingRegionMode", int.class);
         callInt(ctx, "x11_onyx_refresh", "android.onyx.optimization.EInkHelper", "setAppScopeRefreshMode", int.class);
         callInt(ctx, "x11_onyx_strokestyle", "android.onyx.ViewUpdateHelper", "setStrokeStyle", int.class);
+        // The measured difference against the native canvas is the TCON
+        // display mode: it runs display_mode[1] and completes a handwriting
+        // update in ~2.7 ms; we run display_mode[4] and take ~85 ms, which is
+        // the entire remaining gap. These are the candidate controls.
+        callInt(ctx, "x11_onyx_scheme", "android.onyx.ViewUpdateHelper", "setDisplayScheme", int.class);
+        callInt(ctx, "x11_onyx_turbo", "android.onyx.ViewUpdateHelper", "setEpdTurbo", int.class);
+        callInt(ctx, "x11_onyx_bwmode", "android.onyx.ViewUpdateHelper", "setBWMode", int.class);
+        callInt(ctx, "x11_onyx_grayscale", "android.onyx.ViewUpdateHelper", "setGrayscaleMode", int.class);
+        callInt(ctx, "x11_onyx_gcinterval", "android.onyx.ViewUpdateHelper", "setGcRefreshInterval", int.class);
         callFloat(ctx, "x11_onyx_strokewidth", "android.onyx.ViewUpdateHelper", "setStrokeWidth");
     }
 
