@@ -89,6 +89,22 @@ for manifest, anchor, replacement in (
     p.write_text(s)
     print(f"  + tools:replace in {manifest}")
 
+# 2c. Three of the SDK's transitive artifacts each ship their own copy of
+# lib/arm64-v8a/libc++_shared.so (onyxsdk-pen, onyxsdk-pennative, mmkv), and
+# the application module refuses to merge them:
+#   3 files found with path 'lib/arm64-v8a/libc++_shared.so'
+# They are the same C++ runtime; take the first. This is the collision
+# onyx-intl/OnyxAndroidDemo#144 describes for 1.5.4.
+edit("lorie-app/build.gradle",
+     """android {
+    namespace 'com.termux.x11.app'""",
+     """android {
+    packagingOptions {
+        pickFirst '**/libc++_shared.so'
+    }
+    namespace 'com.termux.x11.app'""",
+     "pickFirst libc++_shared.so")
+
 # 3. The hook.
 (root / "lorie/src/main/java/com/termux/x11/OnyxPen.java").write_text('''package com.termux.x11;
 
