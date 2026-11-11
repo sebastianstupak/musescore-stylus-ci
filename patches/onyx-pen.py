@@ -277,6 +277,14 @@ public final class OnyxPen {
                 // PEN_STOP, not PEN_PAUSE: the panel must leave handwriting
                 // mode between strokes or the app's own repaint never shows.
                 EpdController.setScreenHandWritingPenState(v, EpdPenManager.PEN_STOP);
+                // ...and PEN_STOP alone is not enough. Measured: with only
+                // PEN_STOP the panel stayed frozen (liveness check: 0 px) and
+                // the build had to be rolled back. The SDK's own
+                // RendererToScreenRequest pairs every
+                // setViewDefaultUpdateMode(view, HAND_WRITING_REPAINT_MODE)
+                // with resetViewUpdateMode(view) -- that is the call that
+                // gives the view back to normal refresh.
+                EpdController.resetViewUpdateMode(v);
             }
         } catch (Throwable t) {
             Log.i(TAG, "epdEnd failed: " + t);
