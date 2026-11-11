@@ -239,6 +239,8 @@ public final class OnyxPen {
 
     // EACScreenNoteManager, reached reflectively: it is framework-internal, so
     // there is nothing to compile against. Resolved once.
+    private static int moves;
+    private static int reapplyEvery;
     private static Object eacManager;
     private static Method eacOnDispatchMotionEvent;
 
@@ -311,6 +313,36 @@ public final class OnyxPen {
         callInt(ctx, "x11_onyx_autosync", "android.onyx.ViewUpdateHelper", "setAutoSyncBufEnable", boolean.class);
         callInt(ctx, "x11_onyx_regionmode", "android.onyx.ViewUpdateHelper", "setScreenHandWritingRegionMode", int.class);
         callInt(ctx, "x11_onyx_refresh", "android.onyx.optimization.EInkHelper", "setAppScopeRefreshMode", int.class);
+        callInt(ctx, "x11_onyx_strokestyle", "android.onyx.ViewUpdateHelper", "setStrokeStyle", int.class);
+        callFloat(ctx, "x11_onyx_strokewidth", "android.onyx.ViewUpdateHelper", "setStrokeWidth");
+    }
+
+    private static void callFloat(Context ctx, String key, String cls, String method) {
+        String raw;
+        try {
+            raw = Settings.Global.getString(ctx.getContentResolver(), key);
+        } catch (Throwable t) {
+            return;
+        }
+        if (raw == null || raw.trim().isEmpty()) {
+            return;
+        }
+        try {
+            Class.forName(cls).getMethod(method, float.class)
+                    .invoke(null, Float.valueOf(Float.parseFloat(raw.trim())));
+            Log.i(TAG, key + "=" + raw.trim() + " -> " + method);
+        } catch (Throwable t) {
+            Log.i(TAG, key + " failed: " + t);
+        }
+    }
+
+    private static int intSetting(Context ctx, String key, int dflt) {
+        try {
+            String raw = Settings.Global.getString(ctx.getContentResolver(), key);
+            return (raw == null || raw.trim().isEmpty()) ? dflt : Integer.parseInt(raw.trim());
+        } catch (Throwable t) {
+            return dflt;
+        }
     }
 
     private static void callInt(Context ctx, String key, String cls, String method, Class<?> type) {
@@ -340,14 +372,35 @@ public final class OnyxPen {
      */
     public static void onStrokeStart(MotionEvent e) {
         LorieView v = view;
-        if (v == null || e == null || e.getAction() != MotionEvent.ACTION_DOWN) {
+        if (v == null || e == null) {
             return;
         }
         if (e.getToolType(0) != MotionEvent.TOOL_TYPE_STYLUS
                 && e.getToolType(0) != MotionEvent.TOOL_TYPE_ERASER) {
             return;
         }
-        applyTunables(v.getContext());
+        // On DOWN, and then on every Nth MOVE.
+        //
+        // Applying once on DOWN measured as having no effect at all, and the
+        // likeliest reason is ordering: EAC runs applyStrokeParam when it
+        // enters handwriting mode, from inside the framework's own
+        // dispatchTouchEvent hook, so whatever it sets lands after whatever we
+        // set. Re-applying mid-stroke is the way to find out whether these
+        // knobs are inert or merely overwritten.
+        //
+        // x11_onyx_reapply = 0/unset -> DOWN only; N -> also every Nth move.
+        if (e.getAction() == MotionEvent.ACTION_DOWN) {
+            moves = 0;
+            applyTunables(v.getContext());
+            return;
+        }
+        if (e.getAction() != MotionEvent.ACTION_MOVE) {
+            return;
+        }
+        int every = reapplyEvery;
+        if (every > 0 && (++moves % every) == 0) {
+            applyTunables(v.getContext());
+        }
     }
 
     private static void bindEac() {
@@ -357,6 +410,7 @@ public final class OnyxPen {
             eacOnDispatchMotionEvent =
                     c.getMethod("onDispatchMotionEvent", View.class, MotionEvent.class);
             Log.i(TAG, "EACScreenNoteManager bound");
+            reapplyEvery = intSetting(view.getContext(), "x11_onyx_reapply", 0);
             applyTunables(view.getContext());
         } catch (Throwable t) {
             Log.i(TAG, "no EACScreenNoteManager, carrying on without it: " + t);
