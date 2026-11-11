@@ -332,6 +332,7 @@ public final class OnyxPen {
         callInt(ctx, "x11_onyx_bwmode", "android.onyx.ViewUpdateHelper", "setBWMode", int.class);
         callInt(ctx, "x11_onyx_grayscale", "android.onyx.ViewUpdateHelper", "setGrayscaleMode", int.class);
         callInt(ctx, "x11_onyx_gcinterval", "android.onyx.ViewUpdateHelper", "setGcRefreshInterval", int.class);
+        applyFastMode(ctx);
         callFloat(ctx, "x11_onyx_strokewidth", "android.onyx.ViewUpdateHelper", "setStrokeWidth");
     }
 
@@ -351,6 +352,52 @@ public final class OnyxPen {
             Log.i(TAG, key + "=" + raw.trim() + " -> " + method);
         } catch (Throwable t) {
             Log.i(TAG, key + " failed: " + t);
+        }
+    }
+
+    /**
+     * Application fast mode -- what the stock canvas announces on screen
+     * ("This is fast mode !!!") and the only remaining candidate for the
+     * ~88 ms handwriting update we are stuck at, where native takes ~2.7 ms.
+     *
+     * This is the framework call the SDK's EpdController.applyApplicationFastMode
+     * wraps: applyAppScopeUpdate(application, enable, updateMode). Note that
+     * EInkHelper.setAppScopeRefreshMode(4) was measured to be a NO-OP -- it
+     * logs success and leaves refreshModeIndex at refresh_mode_2 -- so the
+     * refresh-mode route is not this one.
+     *
+     *   settings put global x11_onyx_fastmode <updateMode int>   # enable
+     *   settings put global x11_onyx_fastmode -1                 # disable
+     */
+    private static void applyFastMode(Context ctx) {
+        int mode = intSetting(ctx, "x11_onyx_fastmode", -99);
+        if (mode == -99) {
+            return;
+        }
+        try {
+            Class<?> c = Class.forName("android.onyx.ViewUpdateHelper");
+            String app = ctx.getPackageName();
+            if (mode < 0) {
+                c.getMethod("applyAppScopeUpdate", String.class, boolean.class, int.class)
+                        .invoke(null, app, Boolean.FALSE, Integer.valueOf(0));
+                Log.i(TAG, "fast mode OFF");
+            } else {
+                c.getMethod("applyAppScopeUpdate", String.class, boolean.class, int.class)
+                        .invoke(null, app, Boolean.TRUE, Integer.valueOf(mode));
+                Log.i(TAG, "fast mode ON updateMode=" + mode
+                        + " inFastMode=" + query(c, "isInFastMode")
+                        + " index=" + query(c, "getFastModeIndex"));
+            }
+        } catch (Throwable t) {
+            Log.i(TAG, "fast mode failed: " + t);
+        }
+    }
+
+    private static String query(Class<?> c, String method) {
+        try {
+            return String.valueOf(c.getMethod(method).invoke(null));
+        } catch (Throwable t) {
+            return "?";
         }
     }
 
