@@ -145,54 +145,183 @@ edit("lorie-app/build.gradle",
      "minification off for debug")
 
 # 3. The hook.
+#
+# Two mechanisms live here, chosen at RUNTIME so one build can A/B them:
+#
+#   settings put global x11_onyxpen_mode eac   (default) -- the firmware's own
+#       EACScreenNoteManager, handed the view its config names
+#   settings put global x11_onyxpen_mode sdk   -- Onyx's pen SDK, TouchHelper
+#       with FEATURE_SF_TOUCH_RENDER
+#   settings put global x11_onyxpen_mode off   -- neither; stock behaviour
+#
+# `eac` is the default because the firmware told us, in its own words, that it
+# is already most of the way there. See runbook 13 4p.
 (root / "lorie/src/main/java/com/termux/x11/OnyxPen.java").write_text('''package com.termux.x11;
 
+import android.content.Context;
 import android.graphics.Rect;
+import android.provider.Settings;
 import android.util.Log;
+import android.view.MotionEvent;
+import android.view.View;
 
 import com.onyx.android.sdk.data.note.TouchPoint;
 import com.onyx.android.sdk.pen.RawInputCallback;
 import com.onyx.android.sdk.pen.TouchHelper;
 import com.onyx.android.sdk.pen.data.TouchPointList;
 
+import java.lang.reflect.Method;
 import java.util.ArrayList;
 
 /**
  * Low-latency ink for Onyx Boox devices.
  *
- * TouchHelper hands the stroke to the e-ink controller, which paints it from
- * the kernel's handwriting buffer without the app producing a frame at all --
- * measured on a Note Air 4C as literally zero DRM frame commits, against ~3
- * frames and ~59 ms per sample for the same stroke drawn through Qt.
+ * The native note app paints ink with ZERO DRM frame commits -- measured on a
+ * Note Air 4C, against ~3 frames and ~59 ms per sample for the same stroke
+ * drawn through Qt. The e-ink controller paints the stroke; the app never
+ * produces a frame for it.
  *
- * Raw drawing consumes the pen, so X would otherwise go blind. Every point is
- * therefore fed back through LorieView.sendStylusEvent(), the same native call
- * the ordinary MotionEvent path uses, which keeps X clients seeing the pen
- * exactly as before. Pressure is rescaled from the SDK's 0..4095 to the 0..65535
- * that path expects; tilt is zeroed because TouchPoint does not carry it.
+ * MODE "eac" -- the firmware's own path
+ * ------------------------------------
+ * This device's framework is patched: `android.view.View.dispatchTouchEvent`
+ * calls `EACScreenNoteManager.onDispatchMotionEvent(view, event)`, and EAC
+ * accelerates handwriting on any app whose EAC config names the drawing view
+ * (`globalActivityConfig.noteConfig.drawViewKey`; six packages ship one --
+ * OneNote, Evernote, WPS...). Ours already names `com.termux.x11.LorieView`,
+ * and with `sys.oec.service.debug` on, EAC is visibly doing its half:
  *
- * Every SDK call is guarded: on a non-Onyx device TouchHelper.create() throws,
- * and the app must carry on as a perfectly ordinary X server.
+ *     startEACScreenNote, limitRegion: Rect(0, 0 - 2480, 1860)
+ *     setScreenHandWritingRegionLimit: com.termux.x11.LorieView{...}
+ *     setScreenHandWritingPenState: PEN_START
+ *
+ * and then refusing on every sample:
+ *
+ *     onDispatchMotionEventImpl, View: android.widget.FrameLayout{app:id/frame}
+ *     onStylusEventOutsideDrawViewImpl
+ *     setScreenHandWritingPenState: PEN_PAUSE
+ *
+ * Because termux-x11 puts its touch listener on the PARENT
+ * (`lorieParent.setOnTouchListener`, MainActivity), the parent is the touch
+ * target, so the framework hook fires with the FrameLayout. EAC matches that
+ * against `drawViewKey`, finds no match, calls the stroke "outside draw view"
+ * and PAUSES handwriting -- once per sample.
+ *
+ * So this mode hands the same event back to EAC attributed to the LorieView,
+ * which is the view its own config asks for. No EPD call of our own: EAC owns
+ * the pen state, the region and the post-stroke repaint, and it is the code
+ * Onyx ships for exactly this job.
+ *
+ * MODE "sdk" -- Onyx's pen SDK
+ * ----------------------------
+ * `TouchHelper` with `FEATURE_SF_TOUCH_RENDER`, kept for comparison. Note the
+ * two-argument `create(view, callback)` selects `FEATURE_APP_TOUCH_RENDER`,
+ * where the SDK captures the pen and the APP must paint it -- which is why an
+ * earlier build saw points arrive and the panel never change scheme. Raw
+ * drawing consumes the pen, so points are fed back through
+ * `LorieView.sendStylusEvent()` to keep X clients seeing it.
+ *
+ * Every call is guarded. On a non-Onyx device the SDK and the framework
+ * classes are both absent, and the app must carry on as an ordinary X server.
  */
 public final class OnyxPen {
     private static final String TAG = "OnyxPen";
+    private static final String MODE_SETTING = "x11_onyxpen_mode";
     private static final float PRESSURE_SCALE = 65535.0f / 4095.0f;
     private static final float STROKE_WIDTH = 3.0f;
-    // Long enough that it does not fire between the strokes of a single
-    // written character, short enough to feel immediate.
+    // Long enough not to fire between the strokes of one character, short
+    // enough to feel immediate. Only used in "sdk" mode; in "eac" mode the
+    // firmware uses its own noteConfig.repaintLatency (500 ms here).
     private static final int PEN_UP_REFRESH_MS = 400;
 
     private static TouchHelper helper;
     private static LorieView view;
+    private static String mode = "eac";
+
+    // EACScreenNoteManager, reached reflectively: it is framework-internal, so
+    // there is nothing to compile against. Resolved once.
+    private static Object eacManager;
+    private static Method eacOnDispatchMotionEvent;
 
     private OnyxPen() {
     }
 
     public static void attach(final LorieView v) {
-        if (helper != null || v == null) {
+        if (view != null || v == null) {
             return;
         }
         view = v;
+        mode = readMode(v.getContext());
+        Log.i(TAG, "mode=" + mode);
+        if ("eac".equals(mode)) {
+            bindEac();
+        } else if ("sdk".equals(mode)) {
+            attachSdk(v);
+        }
+    }
+
+    private static String readMode(Context ctx) {
+        try {
+            // Settings.Global is public API, deliberately: this has to be
+            // switchable from adb without a rebuild, and a system property
+            // would need hidden-API reflection to read.
+            String s = Settings.Global.getString(ctx.getContentResolver(), MODE_SETTING);
+            if (s != null && !s.isEmpty()) {
+                return s.trim();
+            }
+        } catch (Throwable t) {
+            Log.i(TAG, "mode lookup failed, defaulting: " + t);
+        }
+        return "eac";
+    }
+
+    private static void bindEac() {
+        try {
+            Class<?> c = Class.forName("android.onyx.optimization.EACScreenNoteManager");
+            eacManager = c.getMethod("sharedInstance").invoke(null);
+            eacOnDispatchMotionEvent =
+                    c.getMethod("onDispatchMotionEvent", View.class, MotionEvent.class);
+            Log.i(TAG, "EACScreenNoteManager bound");
+        } catch (Throwable t) {
+            Log.i(TAG, "no EACScreenNoteManager, carrying on without it: " + t);
+            eacManager = null;
+            eacOnDispatchMotionEvent = null;
+        }
+    }
+
+    /**
+     * Called from the parent's touch listener with the event the parent got.
+     *
+     * Stylus only. EAC's own hook already reports every event against the
+     * parent view, and finger events there are correct -- the pen is the only
+     * thing being re-attributed, and re-reporting touches would fight EAC's
+     * finger handling for no gain.
+     *
+     * Returns nothing and consumes nothing: the framework's own signature is
+     * `void`, so this cannot swallow an event that X needs.
+     */
+    public static void onMotion(MotionEvent e) {
+        LorieView v = view;
+        Method m = eacOnDispatchMotionEvent;
+        if (v == null || m == null || e == null) {
+            return;
+        }
+        if (e.getToolType(0) != MotionEvent.TOOL_TYPE_STYLUS
+                && e.getToolType(0) != MotionEvent.TOOL_TYPE_ERASER) {
+            return;
+        }
+        try {
+            m.invoke(eacManager, v, e);
+        } catch (Throwable t) {
+            // Once, not per sample: at 80 events a second a broken call would
+            // otherwise bury the log that diagnoses it.
+            if (eacOnDispatchMotionEvent != null) {
+                Log.i(TAG, "EAC dispatch failed, disabling: " + t);
+                eacOnDispatchMotionEvent = null;
+            }
+        }
+    }
+
+    private static void attachSdk(final LorieView v) {
         // post(): the surface has no size until it has been laid out, and
         // setLimitRect() of an empty rect silently scribbles nowhere.
         v.post(new Runnable() {
@@ -200,43 +329,20 @@ public final class OnyxPen {
             public void run() {
                 try {
                     Rect limit = new Rect(0, 0, v.getWidth(), v.getHeight());
-                    // FEATURE_SF_TOUCH_RENDER, not the default.
-                    //
-                    // create(view, callback) selects FEATURE_APP_TOUCH_RENDER
-                    // (=1), where the SDK captures the pen and the APP is
-                    // expected to paint it. That is exactly what we measured:
-                    // points arrived (X events per stroke 43 -> 85) and the
-                    // panel never changed scheme -- a native scribble activity
-                    // logs "### EUS, s 3", ours logged only "### EE 0/1".
-                    // Capture without paint.
-                    //
-                    // FEATURE_SF_TOUCH_RENDER (=2) selects SFTouchRender, which
-                    // (from the AAR) drives EpdPenManager.startDrawing() on the
-                    // host view and EpdController.leaveScribbleMode() on the way
-                    // out. SurfaceFlinger painting the stroke IS the native
-                    // path, and it is the one thing we could not reach from
-                    // outside the app that owns the surface.
+                    // FEATURE_SF_TOUCH_RENDER, not the default: see the class
+                    // comment. SFTouchRender drives EpdPenManager and
+                    // leaveScribbleMode itself.
                     helper = TouchHelper.create(v, TouchHelper.FEATURE_SF_TOUCH_RENDER, callback)
                             .setStrokeWidth(STROKE_WIDTH)
                             .setLimitRect(limit, new ArrayList<Rect>())
                             .openRawDrawing();
                     helper.setRawDrawingEnabled(true);
-                    // Input and RENDER are separate switches
-                    // (isRawDrawingInputEnabled vs isRawDrawingRenderEnabled).
-                    // setRawDrawingEnabled alone is the capture half.
                     helper.setRawDrawingRenderEnabled(true);
-                    // The SDK owns the way back out, and that is the whole
-                    // lesson of the three rolled-back builds below: after a
-                    // stroke the panel has to leave handwriting mode and take a
-                    // full refresh, or the app's own repaint never appears.
-                    // Driving that by hand through EpdController froze the
-                    // display every time. setPenUpRefresh* is the SDK's own
-                    // version of it, sequenced correctly from inside.
                     helper.setPenUpRefreshEnabled(true);
                     helper.setPenUpRefreshTimeMs(PEN_UP_REFRESH_MS);
                     Log.i(TAG, "raw drawing enabled (SF render), limit=" + limit);
                 } catch (Throwable t) {
-                    Log.i(TAG, "unavailable, carrying on without it: " + t);
+                    Log.i(TAG, "SDK unavailable, carrying on without it: " + t);
                     helper = null;
                 }
             }
@@ -254,24 +360,21 @@ public final class OnyxPen {
         } finally {
             helper = null;
             view = null;
+            eacManager = null;
+            eacOnDispatchMotionEvent = null;
         }
     }
 
-    // NO EpdController CALLS HERE, on purpose. Three builds drove the pen
-    // state by hand and all three had to be rolled back:
+    // NO EpdController CALLS ANYWHERE IN THIS CLASS, on purpose. Three builds
+    // drove the pen state by hand and all three had to be rolled back:
     //
     //   PEN_START at startup                  -> panel frozen (liveness 0 px)
     //   PEN_START/PEN_STOP per stroke         -> panel frozen
     //   ...plus resetViewUpdateMode(view)     -> black screen
     //
-    // The mistake was mine, not the API's: EpdPenManager owns that lifecycle,
-    // and SFTouchRender (selected by FEATURE_SF_TOUCH_RENDER in attach())
-    // drives it -- startDrawing / pauseDrawing / resumeDrawing / quitDrawing,
-    // then leaveScribbleMode on the way out. Two owners of the panel's refresh
-    // state is exactly how it ends up stuck in one.
-    //
-    // So this class now does precisely two things: ask for SF render, and feed
-    // the points back into X. Painting is the SDK's business.
+    // Both owners of that lifecycle -- EAC in "eac" mode, SFTouchRender in
+    // "sdk" mode -- drive it correctly from inside. Two owners of the panel's
+    // refresh state is exactly how it ends up stuck in one.
 
     private static void forward(TouchPoint p, boolean down) {
         LorieView v = view;
@@ -335,5 +438,21 @@ edit("lorie/src/main/java/com/termux/x11/MainActivity.java",
      """        setContentView(R.layout.main_activity);
         OnyxPen.attach(getLorieView());""",
      "OnyxPen.attach() in onCreate")
+
+# 4b. Re-attribute the pen to the LorieView.
+#
+# termux-x11 puts its touch listener on the PARENT, so the framework's
+# dispatchTouchEvent hook fires with the FrameLayout and EAC -- whose config
+# names the LorieView -- calls every sample "outside draw view" and PAUSES
+# handwriting. Feeding the same event back against the LorieView is what makes
+# EAC's own acceleration apply. Runbook 13 4p has the log that proves it.
+edit("lorie/src/main/java/com/termux/x11/MainActivity.java",
+     """            if (e.getAction() == MotionEvent.ACTION_DOWN)
+                lorieParent.requestUnbufferedDispatch(e);""",
+     """            OnyxPen.onMotion(e);
+
+            if (e.getAction() == MotionEvent.ACTION_DOWN)
+                lorieParent.requestUnbufferedDispatch(e);""",
+     "OnyxPen.onMotion() in the touch listener")
 
 print("onyx-pen patch applied")
