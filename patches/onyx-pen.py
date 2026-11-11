@@ -150,7 +150,9 @@ edit("lorie-app/build.gradle",
 import android.graphics.Rect;
 import android.util.Log;
 
+import com.onyx.android.sdk.api.device.epd.EpdController;
 import com.onyx.android.sdk.data.note.TouchPoint;
+import com.onyx.android.sdk.pen.EpdPenManager;
 import com.onyx.android.sdk.pen.RawInputCallback;
 import com.onyx.android.sdk.pen.TouchHelper;
 import com.onyx.android.sdk.pen.data.TouchPointList;
@@ -177,6 +179,7 @@ import java.util.ArrayList;
 public final class OnyxPen {
     private static final String TAG = "OnyxPen";
     private static final float PRESSURE_SCALE = 65535.0f / 4095.0f;
+    private static final float STROKE_WIDTH = 3.0f;
 
     private static TouchHelper helper;
     private static LorieView view;
@@ -201,6 +204,11 @@ public final class OnyxPen {
                             .setLimitRect(limit, new ArrayList<Rect>())
                             .openRawDrawing();
                     helper.setRawDrawingEnabled(true);
+                    try {
+                        EpdController.setScreenHandWritingPenState(v, EpdPenManager.PEN_START);
+                    } catch (Throwable t) {
+                        Log.i(TAG, "PEN_START failed: " + t);
+                    }
                     Log.i(TAG, "raw drawing enabled, limit=" + limit);
                 } catch (Throwable t) {
                     Log.i(TAG, "unavailable, carrying on without it: " + t);
@@ -224,6 +232,52 @@ public final class OnyxPen {
         }
     }
 
+    // TouchHelper CAPTURES the pen; it does not by itself make the panel paint.
+    // Measured: with TouchHelper alone the SDK delivers points (X event count
+    // per stroke went 43 -> 85, the extra ones being these forwards) but the
+    // EPD never switched scheme -- a native scribble activity logs
+    // "### EUS, s 3", ours logged only "### EE 0/1". The stroke has to be
+    // handed to the controller explicitly, which is what the SDK's own
+    // EpdController demo does.
+    private static void epdBegin(TouchPoint p) {
+        LorieView v = view;
+        if (v == null || p == null) {
+            return;
+        }
+        try {
+            EpdController.setScreenHandWritingPenState(v, EpdPenManager.PEN_DRAWING);
+            EpdController.moveTo(v, p.x, p.y, STROKE_WIDTH);
+        } catch (Throwable t) {
+            Log.i(TAG, "epdBegin failed: " + t);
+        }
+    }
+
+    private static void epdPoint(TouchPoint p) {
+        if (p == null) {
+            return;
+        }
+        try {
+            EpdController.addStrokePoint(STROKE_WIDTH, p.x, p.y, p.pressure, p.size, p.timestamp);
+        } catch (Throwable t) {
+            Log.i(TAG, "epdPoint failed: " + t);
+        }
+    }
+
+    private static void epdEnd(TouchPoint p) {
+        LorieView v = view;
+        try {
+            if (p != null) {
+                EpdController.finishStroke(STROKE_WIDTH, p.x, p.y, p.pressure, p.size, p.timestamp);
+            }
+            EpdController.penUp();
+            if (v != null) {
+                EpdController.setScreenHandWritingPenState(v, EpdPenManager.PEN_PAUSE);
+            }
+        } catch (Throwable t) {
+            Log.i(TAG, "epdEnd failed: " + t);
+        }
+    }
+
     private static void forward(TouchPoint p, boolean down) {
         LorieView v = view;
         if (v == null || p == null) {
@@ -243,16 +297,19 @@ public final class OnyxPen {
     private static final RawInputCallback callback = new RawInputCallback() {
         @Override
         public void onBeginRawDrawing(boolean b, TouchPoint p) {
+            epdBegin(p);
             forward(p, true);
         }
 
         @Override
         public void onEndRawDrawing(boolean b, TouchPoint p) {
+            epdEnd(p);
             forward(p, false);
         }
 
         @Override
         public void onRawDrawingTouchPointMoveReceived(TouchPoint p) {
+            epdPoint(p);
             forward(p, true);
         }
 
