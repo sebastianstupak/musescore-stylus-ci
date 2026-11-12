@@ -18,7 +18,7 @@ on:
     inputs:
       ref:
         description: 'Branch or tag of sebastianstupak/MuseScore to build'
-        default: 'stylus-4.7-ink-damage-rect'
+        default: 'stylus-4.7'
         required: true
 
 jobs:
